@@ -1,0 +1,1038 @@
+---
+title: "STEM Retention Models"
+author: "Jessica Linford"
+date: "4/23/2022"
+output: html_document
+---
+
+```{r setup, include = F}
+knitr::opts_chunk$set(warning = F, message = F)
+library(MASS)
+library(tidyverse)
+library(corrplot)
+library(caret)
+library(car)
+library(leaps)
+library(janitor)
+library(interactions)
+library(glmnet)
+library(cutpointr)
+library(BeSS)
+library(cowplot)
+library(gtsummary)
+```
+
+```{r data_cleaning, include = F}
+# #Read in data
+# stem <- read_csv("stem persistence2.csv", guess_max = 57635)
+# 
+# #Use finalmajor_1 and finalmajorstem columns to get table of majors with STEM
+# #categorization
+# known_majors <- stem %>%
+#   filter(!is.na(finalmajor_1) & is.na(finalmajor_2)) %>%
+#   select(finalmajor_1, finalmajorstem)
+# maj_counts <- table(known_majors$finalmajor_1, known_majors$finalmajorstem)
+# maj <- data.frame(matrix(rep(NA, 266), ncol = 2))
+# names(maj) <- c("major", "stem_category")
+# maj$major <- row.names(maj_counts)
+# maj$stem_category <- ifelse(maj_counts[,2] != 0, "STEM", "Not STEM")
+# 
+# #Make list of all major codes that appear in the dataset by scanning through
+# #all columns that include major codes
+# all_majors <- c(stem[, c(1:3, 15:16, seq(20, 244, by = 2), 246:273)]) %>%
+#   unlist() %>% na.omit() %>% unique() %>% sort()
+# 
+# #Make list of uncategorized majors by finding majors not in the categorized
+# #major table
+# unknown_majors <- all_majors[!(all_majors %in% maj$major)]
+# 
+# #Unknown majors were looked up in course catalogs and STEM lists,
+# #categorized, and the major list was updated in the file majors.csv
+# 
+# majors <- read_csv("majors.csv")
+# stem_majors <- majors$major[majors$stem_category == "STEM"]
+# 
+# #Scan through all majors listed for a student in the data set at any
+# #time point, check if any majors are classified as STEM. Drop students
+# #with no majors classified as STEM
+# stem_class <- function(x) {x %in% stem_majors}
+# 
+# stem_clean <- stem %>%
+#   filter(if_any (.cols = c(1:3, 15, 16, seq(20, 244, by = 2), 246:273),
+#                  stem_class))
+# 
+# #Remove NAs - this also removes rows with imputed SAT math scores,
+# #because those students had missing SAT reading scores
+# stem_clean <- stem_clean %>% filter_at(vars(finalmajorstem, studentadmitcode,
+#                                             satcr), all_vars(!is.na(.)))
+# 
+# #Remove students with impossible SAT scores and unusual admission codes
+# stem_clean <- stem_clean %>% filter(satcr != 579 & satm != 960 &
+#                                         !(studentadmitcode %in% c("Katrina",
+#                                               "Postbacc Undergraduate")))
+# 
+# # Collapse categories of ethnic group and studentadmitcode
+# stem_clean$ethnicgroup <- factor(stem_clean$ethnicgroup) %>%
+#   fct_collapse("Other" = c("Other (Collapsed)", "International"))
+# 
+# stem_clean$studentadmitcode <- factor(stem_clean$studentadmitcode) %>%
+#   fct_drop() %>%
+#   fct_collapse("Freshman" = c("Freshman", "International Freshman"),
+#                "Transfer" = c("Transfer", "International Transfer"))
+# 
+# #Create variables for STEM category of original major and 1st semester GPA
+# stem_clean$major1stem <- ifelse(stem_clean$major_1curric_1start %in%
+#                                 stem_majors | stem_clean$major_2curric_1start
+#                                 %in% stem_majors, "STEM", "Not STEM")
+# 
+# gpa_by_term <- stem_clean[, seq(21, 245, by = 2)]
+# gpa_by_term_lists <- lapply(1:nrow(gpa_by_term), function(x)
+#                             gpa_by_term[x,][!is.na(gpa_by_term[x,])])
+# stem_clean$firstgpa <- purrr::map(gpa_by_term_lists, 1) %>% unlist()
+# 
+# # Alternate method to purrr::map
+# 
+# # gpa_by_term_df <- stri_list2matrix(gpa_by_term_lists, byrow = T,
+# #                    fill = NA) %>%
+# #   apply(2, function(x) as.numeric(x)) %>% data.frame()
+# #
+# # stem_clean$firstgpa <- gpa_by_term_df[,1]
+# 
+# # Select columns for analysis
+# stem_clean <- stem_clean %>% select(c(4:12, 14, 274:275, 19, 18))
+
+### START HERE
+stem_clean <- read_csv("clean_stem_data.csv")
+
+# Recode categorical variables as factors
+stem_clean$gender <- factor(stem_clean$gender)
+stem_clean$ethnicgroup <- factor(stem_clean$ethnicgroup) %>% 
+  fct_infreq()
+stem_clean$pelleligible <- factor(stem_clean$pelleligible)
+stem_clean$firstgeneration <- factor(stem_clean$firstgeneration)
+stem_clean$studentadmitcode <- factor(stem_clean$studentadmitcode) %>% 
+  fct_infreq()
+stem_clean$major1stem <- factor(stem_clean$major1stem)
+stem_clean$finalmajorstem <- factor(stem_clean$finalmajorstem)
+
+# rm(stem, known_majors, maj_counts, maj, all_majors, unknown_majors, majors,
+#    stem_majors, stem_class, gpa_by_term, gpa_by_term_lists)
+```
+
+```{r corr_plot}
+Xquan <- stem_clean %>%
+  select(where(is.numeric))
+
+Y <- stem_clean$finalmajorstem
+
+Xquan %>% cor() %>% corrplot(order = "hclust")
+
+vif(glm(Y ~ ., data = cbind.data.frame(Xquan, Y), family = "binomial"))
+
+rm(Xquan)
+```
+
+```{r gender}
+stem_clean %>% 
+  tabyl(finalmajorstem, gender) %>% 
+  adorn_percentages("col") %>% 
+  adorn_pct_formatting(digits = 1) %>% 
+  adorn_ns
+
+ggplot(stem_clean, aes(x = gender, fill = finalmajorstem)) +
+  geom_bar() +
+  labs(x = "Gender", y = "Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot1 <- ggplot(stem_clean, aes(x = gender, fill = finalmajorstem)) +
+  geom_bar(position = "fill") +
+  labs(x = "Gender", y = "Relative Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() + 
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))
+plot1
+```
+
+```{r ethnic_group}
+stem_clean %>% 
+  tabyl(finalmajorstem, ethnicgroup) %>% 
+  adorn_percentages("col") %>% 
+  adorn_pct_formatting(digits = 1) %>% 
+  adorn_ns
+
+ggplot(stem_clean, aes(x = ethnicgroup, fill = finalmajorstem)) +
+  geom_bar() +
+  labs(x = "Ethnic Group", y = "Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot2 <- ggplot(stem_clean, aes(x = ethnicgroup, fill = finalmajorstem)) +
+  geom_bar(position = "fill") +
+  labs(x = "Ethnic Group", y = "Relative Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))
+plot2
+```
+
+```{r pell_eligibility}
+stem_clean %>% 
+  tabyl(finalmajorstem, pelleligible) %>% 
+  adorn_percentages("col") %>% 
+  adorn_pct_formatting(digits = 1) %>% 
+  adorn_ns
+
+ggplot(stem_clean, aes(x = pelleligible, fill = finalmajorstem)) +
+  geom_bar() +
+  labs(x = "Pell Eligibility", y = "Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot3 <- ggplot(stem_clean, aes(x = pelleligible, fill = finalmajorstem)) +
+  geom_bar(position = "fill") +
+  labs(x = "Pell Eligibility", y = "Relative Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))
+plot3
+```
+
+```{r first_generation}
+stem_clean %>% 
+  tabyl(finalmajorstem, firstgeneration) %>% 
+  adorn_percentages("col") %>% 
+  adorn_pct_formatting(digits = 1) %>% 
+  adorn_ns
+
+ggplot(stem_clean, aes(x = firstgeneration, fill = finalmajorstem)) +
+  geom_bar() +
+  labs(x = "First Generation?", y = "Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot4 <- ggplot(stem_clean, aes(x = firstgeneration, fill = finalmajorstem)) +
+  geom_bar(position = "fill") +
+  labs(x = "First Generation?", y = "Relative Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))
+plot4
+```
+
+```{r admission_type}
+stem_clean %>% 
+  tabyl(finalmajorstem, studentadmitcode) %>% 
+  adorn_percentages("col") %>% 
+  adorn_pct_formatting(digits = 1) %>% 
+  adorn_ns
+
+ggplot(stem_clean, aes(x = studentadmitcode, fill = finalmajorstem)) +
+  geom_bar() +
+  labs(x = "Admission Type", y = "Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot5 <- ggplot(stem_clean, aes(x = studentadmitcode, fill = finalmajorstem)) +
+  geom_bar(position = "fill") +
+  labs(x = "Admission Type", y = "Relative Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))
+plot5
+```
+
+```{r major1stem}
+stem_clean %>% 
+  tabyl(finalmajorstem, major1stem) %>% 
+  adorn_percentages("col") %>% 
+  adorn_pct_formatting(digits = 1) %>% 
+  adorn_ns
+
+ggplot(stem_clean, aes(x = major1stem, fill = finalmajorstem)) +
+  geom_bar() +
+  labs(x = "Initial Major Type", y = "Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plot6 <- ggplot(stem_clean, aes(x = major1stem, fill = finalmajorstem)) +
+  geom_bar(position = "fill") +
+  labs(x = "Initial Major Type", y = "Relative Frequency",
+       fill = "Final Major Type") +
+  theme_minimal() +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))
+plot6
+```
+
+```{r cumulative_gpa}
+plot7 <- ggplot(stem_clean, aes(x = cumulativegpa)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem),
+                 color = "light gray", alpha = 0.4, position = 'identity') +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "Cumulative GPA", y = "Density", fill = "Final Major Category",
+       color = "Final Major Category") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot7
+```
+
+```{r total_transfer hrs}
+plot8 <- ggplot(stem_clean, aes(x = totaltransferhrs)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem),
+                 color = "light gray", alpha = 0.4, position = 'identity') +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "Total Transfer Hrs", y = "Density", fill = "Final Major Category",
+       color = "Final Major Category") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot8
+```
+
+```{r first_term_hrs}
+plot9 <- ggplot(stem_clean, aes(x = hrsregistered1stterm)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem),
+                 color = "light gray", alpha = 0.4, position = 'identity',
+                 breaks = seq(0, 24, 3)) +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "First Term Hours", y = "Density", fill = "Final Major Category",
+       color = "Final Major Category") +
+  scale_x_continuous(breaks = seq(0, 24, 3)) +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot9
+```
+
+```{r satcr}
+plot10 <- ggplot(stem_clean, aes(x = satcr)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem),
+                 breaks = seq(200, 800, 20),
+                 color = "light gray", alpha = 0.4, position = 'identity') +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "SAT Critical Reading Score", y = "Density",
+       fill = "Final Major Category", color = "Final Major Category") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot10
+```
+
+```{r satm}
+plot11 <- ggplot(stem_clean, aes(x = satm)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem), 
+                 breaks = seq(200, 800, 20),
+                 color = "light gray", alpha = 0.4, position = 'identity') +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "SAT Math Score", y = "Density",
+       fill = "Final Major Category", color = "Final Major Category") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot11
+```
+
+```{r first_semester_gpa}
+plot12 <- ggplot(stem_clean, aes(x = firstgpa)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem),
+                 breaks = seq(0, 4, 0.125),
+                 color = "light gray", alpha = 0.4, position = 'identity') +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "First Semester GPA", y = "Density", fill = "Final Major Category",
+       color = "Final Major Category") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot12
+```
+
+```{r total_semesters}
+plot13 <- ggplot(stem_clean, aes(x = totalsemesters)) +
+  geom_histogram(aes(y = ..density.., fill = finalmajorstem),
+                 breaks = seq(0.5, 21.5, 1),
+                 color = "light gray", alpha = 0.4, position = 'identity') +
+  geom_density(aes(color = finalmajorstem), size = 1) +
+  labs(x = "Total Semesters", y = "Density", fill = "Final Major Category",
+       color = "Final Major Category") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+plot13
+```
+
+```{r combined_bar_graphs}
+categ_plot <- plot_grid(plot1 + theme(legend.position = "none"), 
+          plot2 + theme(legend.position = "none"), 
+          plot3 + theme(legend.position = "none"), 
+          plot4 + theme(legend.position = "none"), 
+          plot5 + theme(legend.position = "none"), 
+          plot6 + theme(legend.position = "none"), nrow = 3, ncol = 2)
+
+legend <- get_legend(plot1 + theme(legend.box.margin = margin(0, 0, 0, 12)))
+plot_grid(categ_plot, legend, rel_widths = c(3, 0.6))
+
+#rm(plot1, plot2, plot3, plot4, plot5, plot6)
+```
+
+```{r combined_histograms}
+quan_plot <- plot_grid(plot7 + theme(legend.position = "none"), 
+          plot8 + theme(legend.position = "none"), 
+          plot9 + theme(legend.position = "none"), 
+          plot10 + theme(legend.position = "none"), 
+          plot11 + theme(legend.position = "none"), 
+          plot12 + theme(legend.position = "none"),
+          plot13 + theme(legend.position = "none"), nrow = 4, ncol = 2)
+
+legend <- get_legend(plot7 + theme(legend.box.margin = margin(0, 0, 0, 12)))
+plot_grid(quan_plot, legend, rel_widths = c(3, 0.6))
+
+#rm(plot7, plot8, plot9, plot10, plot11, plot12, plot13)
+```
+
+```{r table_of_categorical_variables}
+stem_clean %>% select(gender, ethnicgroup, pelleligible, firstgeneration,
+                      studentadmitcode, major1stem, finalmajorstem) %>% 
+  mutate(finalmajorstem = relevel(finalmajorstem, ref = "STEM"),
+         major1stem = relevel(major1stem, ref = "STEM")) %>% 
+  tbl_summary(by = finalmajorstem, percent = "row",
+              label = list(gender ~ "Gender", ethnicgroup ~ "Ethnic Group",
+                           pelleligible ~ "Pell Eligible?", 
+                           firstgeneration ~ "First Generation Student?",
+                           studentadmitcode ~ "Admission Type",
+                           major1stem ~ "Initial Major Category"),
+              type = list(pelleligible ~ "categorical",
+                          firstgeneration ~ "categorical")) %>% 
+  add_overall(last = TRUE, statistic = ~ "n = {n}", 
+              col_label = "**Total**") %>% 
+  modify_header(c("stat_1", "stat_2") ~ "**{level}**",
+                label = "**Factor**") %>% 
+  modify_spanning_header(c("stat_1", "stat_2") ~ 
+                           "**Final Major Category**") %>% 
+  modify_footnote(update = everything() ~ NA) %>%
+  bold_labels()
+```
+
+```{r table_of_quantitative_variables}
+stem_clean %>% select(cumulativegpa, totaltransferhrs, 
+                      hrsregistered1stterm, satcr, satm, firstgpa,
+                      totalsemesters, finalmajorstem) %>% 
+  mutate(finalmajorstem = relevel(finalmajorstem, ref = "STEM")) %>% 
+  tbl_summary(by = finalmajorstem,
+              label = list(cumulativegpa ~ "Cumulative GPA",
+                           totaltransferhrs ~ "Transfer Hours",
+                           hrsregistered1stterm ~ "First Semester Hours", 
+                           satcr ~ "SAT Reading Score",
+                           satm ~ "SAT Math Score",
+                           firstgpa ~ "First Semester GPA",
+                           totalsemesters ~ "Total Semesters"),
+              type = all_continuous() ~ "continuous2",
+              statistic = all_continuous() ~ c("{median} ({p25}, {p75})",
+                                               "{mean} ({sd})"),
+              digits = all_continuous() ~ 1) %>% 
+  modify_header(label = "**Factor**") %>% 
+  modify_spanning_header(c("stat_1", "stat_2") ~ 
+                           "**Final Major Category**") %>% 
+  modify_footnote(update = everything() ~ NA) %>%
+  bold_labels()
+```
+
+```{r interactions}
+#Gender and ethnic group - no significant interactions
+glm1 <- glm(finalmajorstem ~ gender*ethnicgroup, 
+            data = stem_clean, family = "binomial")
+summary(glm1)
+int1 <- cat_plot(glm1, gender, ethnicgroup, line.thickness = 1, 
+                 pred.point.size = 2,
+                 y.label = "Probability",
+                 x.label = "Gender",
+                 legend.main = "Ethnic Group") +
+  theme_bw() + 
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(1, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#SAT math and gender - significant interaction
+glm2 <- glm(finalmajorstem ~ satm*gender, 
+            data = stem_clean, family = "binomial")
+summary(glm2)
+int2 <- interact_plot(glm2, satm, modx = gender,
+              y.label = "Probability",
+              x.label = "SAT Math Score",
+              legend.main = "Gender") +
+  theme_bw() + 
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#SAT math and ethnic group - significant interaction for Black
+glm3 <- glm(finalmajorstem ~ satm*ethnicgroup, 
+            data = stem_clean, family = "binomial")
+summary(glm3)
+int3 <- interact_plot(glm3, satm, modx = ethnicgroup,
+                      y.label = "Probability",
+                      x.label = "SAT Math Score",
+                      legend.main = "Ethnic Group") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#Cumulative GPA and gender - significant interaction
+glm4 <- glm(finalmajorstem ~ cumulativegpa*gender,
+            data = stem_clean, family = "binomial")
+summary(glm4)
+int4 <- interact_plot(glm4, cumulativegpa, modx = gender,
+                      y.label = "Probability",
+                      x.label = "Cumulative GPA",
+                      legend.main = "Gender") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#Cumulative GPA and ethnic group - significant interaction (Hispanic only)
+glm5 <- glm(finalmajorstem ~ cumulativegpa*ethnicgroup, 
+            data = stem_clean, family = "binomial")
+summary(glm5)
+int5 <- interact_plot(glm5, cumulativegpa, modx = ethnicgroup,
+                      y.label = "Probability",
+                      x.label = "Cumulative GPA",
+                      legend.main = "Ethnic Group") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#1st semester GPA and gender - no significant interaction
+glm6 <- glm(finalmajorstem ~ firstgpa*gender,
+            data = stem_clean, family = "binomial")
+summary(glm6)
+int6 <- interact_plot(glm6, firstgpa, modx = gender,
+                      y.label = "Probability",
+                      x.label = "First Semester GPA",
+                      legend.main = "Gender") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#1st semester GPA and ethnic group - no significant interactions
+glm7 <- glm(finalmajorstem ~ firstgpa*ethnicgroup, 
+            data = stem_clean, family = "binomial")
+summary(glm7)
+int7 <- interact_plot(glm7, firstgpa, modx = ethnicgroup,
+                      y.label = "Probability",
+                      x.label = "First Semester GPA",
+                      legend.main = "Ethnic Group") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#1st semester GPA and whether 1st major was STEM - significant interaction
+glm8 <- glm(finalmajorstem ~ firstgpa*major1stem,
+            data = stem_clean, family = "binomial")
+summary(glm8)
+int8 <- interact_plot(glm8, firstgpa, modx = major1stem,
+                      y.label = "Probability",
+                      x.label = "First Semester GPA",
+                      legend.main = "Initial Major") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(2, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#1st major category and gender - significant
+glm9 <- glm(finalmajorstem ~ gender*major1stem, 
+            data = stem_clean, family = "binomial")
+summary(glm9)
+int9 <- cat_plot(glm9, gender, major1stem, line.thickness = 1, 
+                 pred.point.size = 2,
+                 y.label = "Probability",
+                 x.label = "Gender",
+                 legend.main = "Initial Major") +
+  theme_bw() +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(1, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#1st major category and ethnic group - significant for Asian
+glm10 <- glm(finalmajorstem ~ ethnicgroup*major1stem, 
+            data = stem_clean, family = "binomial")
+summary(glm10)
+int10 <- cat_plot(glm10, ethnicgroup, major1stem, line.thickness = 1, 
+                  pred.point.size = 2,
+                  y.label = "Probability",
+                  x.label = "Ethnic Group",
+                  legend.main = "Initial Major") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  theme(legend.key.height = unit(0.7, 'lines')) +
+  theme(legend.key.width = unit(1, "lines")) + 
+  theme(panel.grid = element_blank())
+
+#Combined interaction plots
+plot_grid(int1, int6, int7, int3, int5, int10, int2, int4, int9, int8,
+          nrow = 5, ncol = 2, scale = 0.9)
+plot_grid(int1, int6, int7, nrow = 1, scale = 0.9)
+plot_grid(int3, int5, int10, nrow = 1, scale = 0.9)
+plot_grid(int2, int4, int9, nrow = 1, scale = 0.9)
+int8
+
+#rm(glm1, glm2, glm3, glm4, glm5, glm6, glm7, glm8, glm9, glm10,
+#   int1, int2, int3, int4, int5, int6, int7, int8, int9, int10)
+```
+
+```{r split_data}
+glm_full <- glm(finalmajorstem ~ . + I(satm^2) + I(firstgpa^2) +
+                gender*ethnicgroup + satm*gender + satm*ethnicgroup +
+                cumulativegpa*gender + cumulativegpa*ethnicgroup + 
+                firstgpa*gender + firstgpa*ethnicgroup + 
+                gender*major1stem + ethnicgroup*major1stem +
+                firstgpa*major1stem, data = stem_clean, 
+                family = "binomial")
+
+Xmat <- model.matrix(glm_full)[,-1]
+
+set.seed(1)
+trainIndex = createDataPartition(Y, p = .75, list = FALSE) %>% as.vector(.)
+testIndex  = (1:length(Y))[-trainIndex]
+
+stemTrain <- stem_clean[trainIndex,]
+stemTest <- stem_clean[testIndex,]
+
+Ytrain <- Y[trainIndex] %>% as.vector()
+Ytest <- Y[testIndex] %>% as.vector()
+
+Xtrain <- Xmat[trainIndex,]
+Xtest <- Xmat[testIndex,]
+```
+
+```{r elastic_net}
+set.seed(1)
+K <- 10
+trainControl <- trainControl(method = "cv", number = K)
+tuneGrid <- expand.grid('alpha'=c(0,.25,.5,.75,1),
+                        'lambda' = seq(0.000001, .001, length.out = 30))
+
+elasticOut <- train(x = Xtrain, y = Ytrain, method = "glmnet",
+                    trControl = trainControl, tuneGrid = tuneGrid)
+elasticOut$bestTune
+
+modelElas <- glmnet(x = Xtrain, y = Ytrain, 
+                    alpha = elasticOut$bestTune$alpha, family = 'binomial')
+
+betaHatElas <- coef(modelElas, s = elasticOut$bestTune$lambda)
+betaHatElas
+
+probHatTestElas <- as.vector(predict(modelElas, Xtest,
+                                     s=elasticOut$bestTune$lambda,
+                                     type = 'response'))
+
+
+cpElastic <- cutpointr(probHatTestElas, Ytest, metric = sum_sens_spec)
+summary(cpElastic)
+plot_metric(cpElastic)
+plot_roc(cpElastic)
+
+YhatTestElas <- ifelse(probHatTestElas >= cpElastic$optimal_cutpoint, 
+                      'STEM', 'Not STEM')
+
+confMatElas <- 
+  confusionMatrix(data = factor(YhatTestElas, levels = c("STEM", "Not STEM")),
+                  reference = factor(Ytest, levels = c("STEM", "Not STEM")))
+confMatElas$table
+c(confMatElas$byClass[1],
+confMatElas$byClass[2],
+confMatElas$byClass[11])
+```
+
+```{r lasso}
+set.seed(1)
+lassoOut <- cv.glmnet(x = Xtrain, y = Ytrain, alpha = 1,
+                      lambda = exp(seq(-11, -4, length = 60)),
+                      family = "binomial")
+plot(lassoOut)
+lassoOut$lambda.min
+lassoOut$lambda.1se
+
+betaHatLasso <- coef(lassoOut, s = lassoOut$lambda.1se)
+betaHatLasso
+
+probHatTestLasso <- as.vector(predict(lassoOut, newx = Xtest, 
+                              s = lassoOut$lambda.1se, 
+                              type = "response"))
+
+cpLasso <- cutpointr(probHatTestLasso, Ytest, metric = sum_sens_spec)
+summary(cpLasso)
+plot_metric(cpLasso)
+plot_roc(cpLasso)
+
+YhatTestLasso = ifelse(probHatTestLasso >= cpLasso$optimal_cutpoint, 
+                       'STEM', 'Not STEM')
+
+confMatLasso <- 
+  confusionMatrix(data = factor(YhatTestLasso, 
+                                levels = c("STEM", "Not STEM")), 
+                reference = factor(Ytest, 
+                                   levels = c("STEM", "Not STEM")))
+confMatLasso$table
+c(confMatLasso$byClass[1],
+confMatLasso$byClass[2],
+confMatLasso$byClass[11])
+```
+```{r step_AIC_no_quadratic_terms}
+glm_train <- glm(finalmajorstem ~ . +
+                gender*ethnicgroup + satm*gender + satm*ethnicgroup +
+                cumulativegpa*gender + cumulativegpa*ethnicgroup + 
+                firstgpa*gender + firstgpa*ethnicgroup + 
+                gender*major1stem + ethnicgroup*major1stem +
+                firstgpa*major1stem, data = stemTrain, family = "binomial")
+
+step_model_no_quad <- stepAIC(glm_train, direction = "both",  k = log(20558))
+summary(step_model_no_quad)
+
+probHatTestStepNoQuad <- predict.glm(step_model_no_quad, newdata = stemTest, 
+                                     type = "response")
+
+cpStepNoQuad <- cutpointr(probHatTestStepNoQuad, Ytest, metric = sum_sens_spec)
+summary(cpStepNoQuad)
+plot_metric(cpStepNoQuad)
+plot_roc(cpStepNoQuad)
+
+YhatTestStepNoQuad <- ifelse(probHatTestStepNoQuad >= 
+                              cpStepNoQuad$optimal_cutpoint,
+                              'STEM', 'Not STEM')
+
+confMatStepNoQuad <- 
+  confusionMatrix(data = factor(YhatTestStepNoQuad, levels = c("STEM", 
+                                                       "Not STEM")), 
+                reference = factor(Ytest, levels = c("STEM", 
+                                                       "Not STEM")))
+confMatStepNoQuad$table
+c(confMatStepNoQuad$byClass[1],
+confMatStepNoQuad$byClass[2],
+confMatStepNoQuad$byClass[11])
+
+mmps(step_model_no_quad,
+     main = "Marginal Model Plots - Stepwise Model, No Quadratic Terms")
+```
+
+```{r step_AIC_with_quadratic_terms}
+glm_train <- glm(finalmajorstem ~ . + I(satm^2) + I(firstgpa^2) +
+                gender*ethnicgroup + satm*gender + satm*ethnicgroup +
+                cumulativegpa*gender + cumulativegpa*ethnicgroup + 
+                firstgpa*gender + firstgpa*ethnicgroup + 
+                gender*major1stem + ethnicgroup*major1stem +
+                firstgpa*major1stem, data = stemTrain, family = "binomial")
+
+step_model <- stepAIC(glm_train, direction = "both",  k = log(20558))
+summary(step_model)
+
+probHatTestStep <- predict.glm(step_model, newdata = stemTest, 
+                           type = "response")
+
+cpStep <- cutpointr(probHatTestStep, Ytest, metric = sum_sens_spec)
+summary(cpStep)
+plot_metric(cpStep)
+plot_roc(cpStep)
+
+YhatTestStep <- ifelse(probHatTestStep >= cpStep$optimal_cutpoint,
+                       'STEM', 'Not STEM')
+
+confMatStep <- 
+  confusionMatrix(data = factor(YhatTestStep, levels = c("STEM", 
+                                                       "Not STEM")), 
+                reference = factor(Ytest, levels = c("STEM", 
+                                                       "Not STEM")))
+confMatStep$table
+c(confMatStep$byClass[1],
+confMatStep$byClass[2],
+confMatStep$byClass[11])
+
+mmps(step_model, 
+     main = "Marginal Model Plots - Stepwise Model with Quadratic Terms")
+```
+
+```{r best_subsets}
+Ytrain <- factor(Ytrain)
+
+bess <- bess(Xtrain, Ytrain, family = "binomial")
+
+summary(bess)
+
+coef(bess, sparse = F, type = "BIC")
+
+XyTrain <- cbind.data.frame(Xtrain, Ytrain)
+names(XyTrain)[44] <- "finalmajorstem"
+
+XyTest <- cbind.data.frame(Xtest, Ytest)
+names(XyTest)[44] <- "finalmajorstem"
+
+bess <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              satm + studentadmitcodeTransfer + genderMale +
+              major1stemSTEM + firstgpa +  I(satm^2) + I(firstgpa^2) +
+              satm:genderMale + cumulativegpa:genderMale + 
+              genderMale:firstgpa + ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+            family = "binomial")
+summary(bess)
+
+probHatTestBess <- predict.glm(bess, newdata = XyTest, 
+                           type = "response")
+
+cpBess <- cutpointr(probHatTestBess, Ytest, metric = sum_sens_spec)
+summary(cpBess)
+plot_metric(cpBess)
+plot_roc(cpBess)
+
+YhatTestBess <- ifelse(probHatTestBess >= cpBess$optimal_cutpoint,
+                       'STEM', 'Not STEM')
+
+confMatBess <- 
+  confusionMatrix(data = factor(YhatTestBess, levels = c("STEM", 
+                                                       "Not STEM")), 
+                reference = factor(Ytest, levels = c("STEM", 
+                                                       "Not STEM")))
+confMatBess$table
+c(confMatBess$byClass[1],
+confMatBess$byClass[2],
+confMatBess$byClass[11])
+
+mmps(bess, terms = ~ cumulativegpa + hrsregistered1stterm + satm + firstgpa + 
+       I(satm^2) + I(firstgpa^2), 
+     main = "Marginal Model Plots - Best Subsets Model with Quadratic Terms",
+     layout = c(4, 2))
+```
+
+```{r model_comparison}
+plot_grid(plot_metric(cpStep) + 
+            labs(title = "Stepwise Model Cutpoint Selection",  
+                 y = "Sensitivity + Specificity"), 
+          plot_metric(cpBess) + 
+            labs(title = "Best Subsets Model Cutpoint Selection",  
+                 y = "Sensitivity + Specificity"), 
+          plot_roc(cpStep) + labs(title = "Stepwise Model ROC Curve"), 
+          plot_roc(cpBess) + labs(title = "Best Subsets Model ROC Curve"), 
+          nrow = 2, ncol = 2)
+
+compare <- data.frame(matrix(NA, nrow = 2, ncol = 6))
+names(compare) <- c("Model", "Optimal_Cutpoint", "Sensitivity",
+                    "Specificity", "Balanced_Accuracy", "AUC")
+compare$Model <- c("Stepwise", "Best Subsets")
+compare$Optimal_Cutpoint <- c(cpStep$optimal_cutpoint,
+                              cpBess$optimal_cutpoint)
+compare$Sensitivity <- c(confMatStep$byClass[1], confMatBess$byClass[1])
+compare$Specificity <- c(confMatStep$byClass[2], confMatBess$byClass[2])
+compare$Balanced_Accuracy <- c(confMatStep$byClass[11],
+                               confMatBess$byClass[11])
+compare$AUC <- c(cpStep$AUC, cpBess$AUC)
+print(compare)
+```
+
+
+```{r odds_ratios}
+
+exp(cbind(OR = coef(step_model)[c(2:5,7:9)], confint(step_model)[c(2:5,7:9),]))
+exp(cbind(OR = coef(bess)[c(5,7)], confint(bess)[c(5,7),]))
+```
+
+```{r importance_step}
+glm_no_ethnicgroup <- glm(finalmajorstem ~ cumulativegpa + 
+    hrsregistered1stterm + satm + studentadmitcode + gender + 
+    major1stem + firstgpa + I(firstgpa^2) + cumulativegpa:gender + 
+    gender:firstgpa + gender:major1stem + major1stem:firstgpa, 
+    family = "binomial", data = stemTrain)
+
+glm_no_cumgpa <- glm(finalmajorstem ~ ethnicgroup + 
+    hrsregistered1stterm + satm + studentadmitcode + gender + 
+    major1stem + firstgpa + I(firstgpa^2) +  
+    gender:firstgpa + gender:major1stem + major1stem:firstgpa, 
+    family = "binomial", data = stemTrain)
+
+glm_no_1sttermhrs <- glm(finalmajorstem ~ ethnicgroup + cumulativegpa + 
+    satm + studentadmitcode + gender + 
+    major1stem + firstgpa + I(firstgpa^2) + cumulativegpa:gender + 
+    gender:firstgpa + gender:major1stem + major1stem:firstgpa, 
+    family = "binomial", data = stemTrain)
+
+glm_no_satm <- glm(finalmajorstem ~ ethnicgroup + cumulativegpa + 
+    hrsregistered1stterm + studentadmitcode + gender + 
+    major1stem + firstgpa + I(firstgpa^2) + cumulativegpa:gender + 
+    gender:firstgpa + gender:major1stem + major1stem:firstgpa, 
+    family = "binomial", data = stemTrain)
+
+glm_no_admitcode <- glm(finalmajorstem ~ ethnicgroup + cumulativegpa + 
+    hrsregistered1stterm + satm + gender + 
+    major1stem + firstgpa + I(firstgpa^2) + cumulativegpa:gender + 
+    gender:firstgpa + gender:major1stem + major1stem:firstgpa, 
+    family = "binomial", data = stemTrain)
+
+glm_no_gender <- glm(finalmajorstem ~ ethnicgroup + cumulativegpa + 
+    hrsregistered1stterm + satm + studentadmitcode +  
+    major1stem + firstgpa + I(firstgpa^2) + major1stem:firstgpa, 
+    family = "binomial", data = stemTrain)
+
+glm_no_major1stem <- glm(finalmajorstem ~ ethnicgroup + cumulativegpa + 
+    hrsregistered1stterm + satm + studentadmitcode + gender + 
+    firstgpa + I(firstgpa^2) + cumulativegpa:gender + 
+    gender:firstgpa, family = "binomial", data = stemTrain)
+
+glm_no_firstgpa <- glm(finalmajorstem ~ ethnicgroup + cumulativegpa + 
+    hrsregistered1stterm + satm + studentadmitcode + gender + 
+    major1stem + cumulativegpa:gender + gender:major1stem, 
+    family = "binomial", data = stemTrain)
+
+an_eth <- anova(glm_no_ethnicgroup, step_model)
+an_cumgpa <- anova(glm_no_cumgpa, step_model)
+an_1sttermhrs <- anova(glm_no_1sttermhrs, step_model)
+an_satm <- anova(glm_no_satm, step_model)
+an_admitcode <- anova(glm_no_admitcode, step_model)
+an_gender <- anova(glm_no_gender, step_model)
+an_major1stem <- anova(glm_no_major1stem, step_model)
+an_1stgpa <- anova(glm_no_firstgpa, step_model)
+
+importance <- data.frame(matrix(data = NA, nrow = 8, ncol = 4))
+names(importance) <- c("Variable", "Deviance", "df", "p_val")
+importance$Variable <- c("Ethnic Group", "Cumulative GPA", 
+                         "1st Semester Hours", "SAT Math Score",
+                         "Admission Type", "Gender", 
+                         "First Major Category", "First Semester GPA")
+importance$Deviance <- c(an_eth$Deviance[2], an_cumgpa$Deviance[2],
+                         an_1sttermhrs$Deviance[2], an_satm$Deviance[2],
+                         an_admitcode$Deviance[2], an_gender$Deviance[2],
+                         an_major1stem$Deviance[2], an_1stgpa$Deviance[2])
+
+importance$df <- c(an_eth$Df[2], an_cumgpa$Df[2],
+                   an_1sttermhrs$Df[2], an_satm$Df[2],
+                   an_admitcode$Df[2], an_gender$Df[2],
+                   an_major1stem$Df[2], an_1stgpa$Df[2])
+
+importance$p_val <- 1-pchisq(importance$Deviance, importance$df)
+
+importance %>% arrange(desc(Deviance))
+```
+
+```{r importance_bess}
+bess <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              satm + studentadmitcodeTransfer + genderMale +
+              major1stemSTEM + firstgpa +  I(satm^2) + I(firstgpa^2) +
+              satm:genderMale + cumulativegpa:genderMale + 
+              genderMale:firstgpa + ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+            family = "binomial")
+
+glmb_no_ethnicgroup <- glm(data = XyTrain, finalmajorstem ~ cumulativegpa + 
+                             hrsregistered1stterm + satm + 
+                             studentadmitcodeTransfer + genderMale +
+                             major1stemSTEM + firstgpa +  I(satm^2) + 
+                             I(firstgpa^2) + satm:genderMale + 
+                             cumulativegpa:genderMale + genderMale:firstgpa + 
+                             major1stemSTEM:firstgpa,
+                           family = "binomial")
+
+glmb_no_cumgpa <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+                      ethnicgroupAsian + hrsregistered1stterm + satm + 
+                      studentadmitcodeTransfer + genderMale +
+                      major1stemSTEM + firstgpa +  I(satm^2) + I(firstgpa^2) +
+                      satm:genderMale + genderMale:firstgpa + 
+                      ethnicgroupHispanic:major1stemSTEM + 
+                      ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+                      family = "binomial")
+
+glmb_no_1sttermhrs <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa +
+              satm + studentadmitcodeTransfer + genderMale +
+              major1stemSTEM + firstgpa +  I(satm^2) + I(firstgpa^2) +
+              satm:genderMale + cumulativegpa:genderMale + 
+              genderMale:firstgpa + ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+            family = "binomial")
+
+glmb_no_satm <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              studentadmitcodeTransfer + genderMale +
+              major1stemSTEM + firstgpa + I(firstgpa^2) +
+              cumulativegpa:genderMale + 
+              genderMale:firstgpa + ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+            family = "binomial")
+
+glmb_no_admitcode <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              satm + genderMale + major1stemSTEM + firstgpa +  I(satm^2) + 
+              I(firstgpa^2) + satm:genderMale + cumulativegpa:genderMale + 
+              genderMale:firstgpa + ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+            family = "binomial")
+
+glmb_no_gender <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              satm + studentadmitcodeTransfer + 
+              major1stemSTEM + firstgpa +  I(satm^2) + I(firstgpa^2) +
+              ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM + major1stemSTEM:firstgpa,
+            family = "binomial")
+
+glmb_no_major1stem <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              satm + studentadmitcodeTransfer + genderMale +
+              firstgpa +  I(satm^2) + I(firstgpa^2) +
+              satm:genderMale + cumulativegpa:genderMale + 
+              genderMale:firstgpa,
+            family = "binomial")
+
+glmb_no_firstgpa <- glm(data = XyTrain, finalmajorstem ~ ethnicgroupHispanic +
+              ethnicgroupAsian + cumulativegpa + hrsregistered1stterm +
+              satm + studentadmitcodeTransfer + genderMale +
+              major1stemSTEM + I(satm^2) + 
+              satm:genderMale + cumulativegpa:genderMale + 
+              ethnicgroupHispanic:major1stemSTEM + 
+              ethnicgroupAsian:major1stemSTEM,
+            family = "binomial")
+
+anb_eth <- anova(glmb_no_ethnicgroup, bess)
+anb_cumgpa <- anova(glmb_no_cumgpa, bess)
+anb_1sttermhrs <- anova(glmb_no_1sttermhrs, bess)
+anb_satm <- anova(glmb_no_satm, bess)
+anb_admitcode <- anova(glmb_no_admitcode, bess)
+anb_gender <- anova(glmb_no_gender, bess)
+anb_major1stem <- anova(glmb_no_major1stem, bess)
+anb_1stgpa <- anova(glmb_no_firstgpa, bess)
+
+importanceb <- data.frame(matrix(data = NA, nrow = 8, ncol = 4))
+names(importanceb) <- c("Variable", "Deviance", "df", "p_val")
+importanceb$Variable <- c("Ethnic Group", "Cumulative GPA", 
+                          "1st Semester Hours", "SAT Math Score",
+                          "Admission Type", "Gender", 
+                          "First Major Category", "First Semester GPA")
+importanceb$Deviance <- c(anb_eth$Deviance[2], anb_cumgpa$Deviance[2],
+                          anb_1sttermhrs$Deviance[2], anb_satm$Deviance[2],
+                          anb_admitcode$Deviance[2], anb_gender$Deviance[2],
+                          anb_major1stem$Deviance[2], anb_1stgpa$Deviance[2])
+
+importanceb$df <- c(anb_eth$Df[2], anb_cumgpa$Df[2],
+                    anb_1sttermhrs$Df[2], anb_satm$Df[2],
+                    anb_admitcode$Df[2], anb_gender$Df[2],
+                    anb_major1stem$Df[2], anb_1stgpa$Df[2])
+
+importanceb$p_val <- 1-pchisq(importanceb$Deviance, importanceb$df)
+
+importanceb %>% arrange(desc(Deviance))
+```
+
